@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -92,6 +93,7 @@ var (
 		// TODO: make this tunable
 		Buckets: prometheus.ExponentialBuckets(0.5, 1.3, 50),
 	})
+	requestAttempts int64
 )
 
 func registerMetrics() {
@@ -198,13 +200,17 @@ func sendNonStreamingRequests(client pb.ResponderClient,
 	clientTimeout time.Duration,
 	lengthDistribution distribution.Distribution,
 	latencyDistribution distribution.Distribution, r *rand.Rand,
-	received chan *MeasuredResponse) {
+	received chan *MeasuredResponse, totalRequests int64) {
 	for {
 		select {
 		case <-shutdownChannel:
 			return
 		default:
-			safeNonStreamingRequest(client, clientTimeout, lengthDistribution, latencyDistribution, r, received)
+			if (atomic.AddInt64(&requestAttempts, 1) < totalRequests + 1) {
+				safeNonStreamingRequest(client, clientTimeout, lengthDistribution, latencyDistribution, r, received)
+			} else {
+				return
+			}
 		}
 	}
 }
@@ -396,7 +402,7 @@ func main() {
 
 			if !*streaming {
 				sendNonStreamingRequests(client, shutdownChannel, *clientTimeout,
-					lengthDistribution, latencyDistribution, r, received)
+					lengthDistribution, latencyDistribution, r, received, *totalRequests)
 			} else {
 				err := sendStreamingRequests(client, shutdownChannel,
 					lengthDistribution, latencyDistribution, *streamingRatio, r, received)
@@ -465,14 +471,7 @@ func main() {
 					jitterHist.RecordValue(jitter)
 					globalJitterHist.RecordValue(jitter)
 				}
-				if *totalRequests > 0 && totalCount + 1 >= *totalRequests {
-					if resp.err != nil {
-						bad++
-						totalBad++
-					} else {
-						good++
-						totalGood++
-					}
+				if *totalRequests > 0 && totalCount >= *totalRequests {
 					cleanup <- struct{}{}
 				}
 
